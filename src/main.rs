@@ -30,24 +30,19 @@ fn main() {
     }
 
     // Bind socket
+    let local: SocketAddr = match flags.server {
+        IpAddr::V4(_) => "0.0.0.0:0".parse().unwrap(),
+        IpAddr::V6(_) => "[::]:0".parse().unwrap(),
+    };
     let rw: Box<dyn RW + Send + Sync> = match flags.proxy {
-        Some(proxy) => match proxy {
-            SocketAddr::V4(_) => match Datagram::bind(proxy, "0.0.0.0:0".parse().unwrap()) {
-                Ok(datagram) => Box::new(datagram),
-                Err(ref e) => {
-                    eprintln!("{}", e);
-                    return;
-                }
-            },
-            SocketAddr::V6(_) => match Datagram::bind(proxy, "[::]:0".parse().unwrap()) {
-                Ok(datagram) => Box::new(datagram),
-                Err(ref e) => {
-                    eprintln!("{}", e);
-                    return;
-                }
-            },
+        Some(proxy) => match Datagram::bind(proxy, local) {
+            Ok(datagram) => Box::new(datagram),
+            Err(ref e) => {
+                eprintln!("{}", e);
+                return;
+            }
         },
-        None => match Socket::bind("0.0.0.0:0".parse().unwrap()) {
+        None => match Socket::bind(local) {
             Ok(socket) => Box::new(socket),
             Err(ref e) => {
                 eprintln!("{}", e);
