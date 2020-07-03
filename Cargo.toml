@@ -9,5 +9,6 @@ description = "Ping a server with DNS."
 
 [dependencies]
 clap = "3.0.0-beta.1"
+ctrlc = "3.1.4"
 dns-parser = "0.8.0"
 socks = "0.3.2"

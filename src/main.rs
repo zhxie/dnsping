@@ -1,6 +1,9 @@
+use ctrlc;
 use dnsping as lib;
 use lib::{Datagram, Socket, RW};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 fn main() {
     // Parse arguments
@@ -26,6 +29,7 @@ fn main() {
         }
     }
 
+    // Bind socket
     let rw: Box<dyn RW + Send + Sync> = match flags.proxy {
         Some(proxy) => match proxy {
             SocketAddr::V4(_) => match Datagram::bind(proxy, "0.0.0.0:0".parse().unwrap()) {
@@ -52,7 +56,19 @@ fn main() {
         },
     };
 
-    if let Err(ref e) = lib::ping(rw, SocketAddr::new(flags.server, flags.port), flags.host) {
+    // Handle Ctrl+C
+    let stopped = Arc::new(AtomicBool::new(false));
+    let stopped_cloned = Arc::clone(&stopped);
+    if !flags.no_stat {
+        ctrlc::set_handler(move || stopped.store(true, Ordering::Relaxed)).unwrap();
+    }
+
+    if let Err(ref e) = lib::ping(
+        rw,
+        stopped_cloned,
+        SocketAddr::new(flags.server, flags.port),
+        flags.host,
+    ) {
         eprintln!("{}", e);
     }
 }

@@ -2,10 +2,11 @@ use clap::{crate_description, crate_version, Clap};
 use dns_parser::{Builder, Packet, QueryClass, QueryType};
 use socks::{Socks5Datagram, TargetAddr};
 use std::clone::Clone;
+use std::cmp;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -17,6 +18,8 @@ use std::time::{Duration, Instant};
     about = crate_description!()
 )]
 pub struct Flags {
+    #[clap(long = "no-stat", about = "Disable statistics")]
+    pub no_stat: bool,
     #[clap(name = "ADDRESS", about = "Server")]
     pub server: IpAddr,
     #[clap(long, short, about = "Port", value_name = "PORT", default_value = "53")]
@@ -111,7 +114,12 @@ impl RW for Socket {
 const PERIOD: u64 = 1000;
 
 /// Pings the DNS server.
-pub fn ping(rw: Box<dyn RW + Send + Sync>, addr: SocketAddr, host: String) -> Result<()> {
+pub fn ping(
+    rw: Box<dyn RW + Send + Sync>,
+    stopped: Arc<AtomicBool>,
+    addr: SocketAddr,
+    host: String,
+) -> Result<()> {
     let is_ipv6 = match addr {
         SocketAddr::V4(_) => false,
         SocketAddr::V6(_) => true,
@@ -175,7 +183,13 @@ pub fn ping(rw: Box<dyn RW + Send + Sync>, addr: SocketAddr, host: String) -> Re
 
     let mut buffer = vec![0u8; u16::MAX as usize];
     let mut recv = 0;
+    let mut min = u128::MAX;
+    let mut max = u128::MIN;
+    let mut total = 0;
     loop {
+        if stopped.load(Ordering::Relaxed) {
+            break;
+        }
         // Receive
         match a_rw_cloned.recv_from(buffer.as_mut_slice()) {
             Ok((size, a)) => {
@@ -184,7 +198,12 @@ pub fn ping(rw: Box<dyn RW + Send + Sync>, addr: SocketAddr, host: String) -> Re
                     if let Ok(ref packet) = Packet::parse(&buffer[..size]) {
                         let id = packet.header.id;
                         if let Some(instant) = a_time_map_cloned.lock().unwrap().get(&id) {
-                            let elapsed = instant.elapsed().as_micros() as f64;
+                            let elapsed = instant.elapsed().as_micros();
+                            min = cmp::min(min, elapsed);
+                            max = cmp::max(max, elapsed);
+                            total += elapsed;
+
+                            let elapsed = elapsed as f64;
                             let elapsed = elapsed / 1000.0;
                             recv += 1;
                             let send = a_send_cloned.load(Ordering::Relaxed);
@@ -213,4 +232,27 @@ pub fn ping(rw: Box<dyn RW + Send + Sync>, addr: SocketAddr, host: String) -> Re
             }
         }
     }
+
+    let send = a_send_cloned.load(Ordering::Relaxed);
+    println!("--- {} ping statistics ---", addr);
+    println!(
+        "{} packets transmitted, {} received, {:.2}% packet loss",
+        send,
+        recv,
+        ((send
+            .checked_sub(recv)
+            .unwrap_or_else(|| send + (usize::MAX - recv))) as f64)
+            / (send as f64)
+            * 100.0
+    );
+    if recv != 0 {
+        println!(
+            "rtt min/avg/max = {:.3}/{:.3}/{:.3} ms",
+            min as f64 / 1000.0,
+            (total as f64 / 1000.0) / (recv as f64),
+            max as f64 / 1000.0
+        );
+    }
+
+    Ok(())
 }
