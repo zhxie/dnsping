@@ -17,14 +17,14 @@ use std::time::{Duration, Instant};
     about = crate_description!()
 )]
 pub struct Flags {
-    #[clap(name = "ADDRESS")]
+    #[clap(name = "ADDRESS", about = "Server")]
     pub server: IpAddr,
     #[clap(long, short, about = "Port", value_name = "PORT", default_value = "53")]
     pub port: u16,
     #[clap(
         long,
         short,
-        about = "Hostname",
+        about = "Host",
         value_name = "HOST",
         default_value = "www.google.com"
     )]
@@ -32,7 +32,7 @@ pub struct Flags {
     #[clap(
         long = "socks-proxy",
         short = "s",
-        about = "SOCKS Proxy",
+        about = "SOCKS proxy",
         value_name = "ADDRESS"
     )]
     pub proxy: Option<SocketAddr>,
