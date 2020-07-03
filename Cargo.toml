@@ -1,0 +1,13 @@
+[package]
+name = "dnsping"
+version = "0.1.0"
+authors = ["Xie Zhihao <xzh1206@gmail.com>"]
+edition = "2018"
+description = "Ping a server with DNS."
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = "3.0.0-beta.1"
+dns-parser = "0.8.0"
+socks = "0.3.2"
