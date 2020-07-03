@@ -19,6 +19,8 @@ dnsping <ADDRESS> -h <HOST> -s <ADDRESS>
 
 `--help`: Prints help information.
 
+`-i, --iterate`: Do DNS query iteratively.
+
 `-V, --version`: Prints version information.
 
 ### Options

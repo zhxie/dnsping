@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 pub struct Flags {
     #[clap(name = "ADDRESS", about = "Server")]
     pub server: IpAddr,
+    #[clap(long, short, about = "Do DNS query iteratively")]
+    pub iterate: bool,
     #[clap(long, short, about = "Port", value_name = "PORT", default_value = "53")]
     pub port: u16,
     #[clap(
@@ -56,6 +58,7 @@ pub trait RW {
 
 /// Represents an UDP datagram, containing a TCP stream keeping the SOCKS proxy alive and an UDP
 /// socket sending and receiving data.
+#[derive(Debug)]
 pub struct Datagram {
     datagram: Socks5Datagram,
 }
@@ -85,6 +88,7 @@ impl RW for Datagram {
 }
 
 /// Represents an UDP socket.
+#[derive(Debug)]
 pub struct Socket {
     socket: UdpSocket,
 }
@@ -112,6 +116,8 @@ impl RW for Socket {
 /// previous ping will be considered as timed out.
 const PERIOD: u64 = 1000;
 
+/// Represents a message.
+#[derive(Debug)]
 pub enum Message {
     Recv(u16, usize),
     Error(Error),
@@ -123,6 +129,7 @@ pub fn ping(
     rw: Box<dyn RW + Send + Sync>,
     tx: Sender<Message>,
     rx: Receiver<Message>,
+    iterate: bool,
     addr: SocketAddr,
     host: String,
 ) -> Result<()> {
@@ -163,7 +170,7 @@ pub fn ping(
         loop {
             id += 1;
             // Create a DNS query
-            let mut query = Builder::new_query(id, true);
+            let mut query = Builder::new_query(id, !iterate);
             if is_ipv6 {
                 query.add_question(&host, false, QueryType::AAAA, QueryClass::IN);
             } else {

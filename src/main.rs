@@ -64,6 +64,7 @@ fn main() {
         rw,
         tx_cloned,
         rx,
+        flags.iterate,
         SocketAddr::new(flags.server, flags.port),
         flags.host,
     ) {
