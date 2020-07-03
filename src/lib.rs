@@ -211,14 +211,19 @@ pub fn ping(
                                 .checked_sub(recv)
                                 .unwrap_or_else(|| send + (usize::MAX - recv));
                             // Log
-                            if recv == send {
+                            if diff == 0 {
                                 println!(
                                     "{} bytes from {}: id={} time={:.2} ms",
                                     size, a, id, elapsed
                                 );
-                            } else {
+                            } else if diff == 1 {
                                 println!(
                                     "{} bytes from {}: id={} time={:.2} ms ({} packet loss)",
+                                    size, a, id, elapsed, diff
+                                );
+                            } else {
+                                println!(
+                                    "{} bytes from {}: id={} time={:.2} ms ({} packets loss)",
                                     size, a, id, elapsed, diff
                                 );
                             }
