@@ -128,50 +128,6 @@ pub fn ping(rw: Box<dyn RW + Send + Sync>, addr: SocketAddr, host: String) -> Re
     let a_send = Arc::new(send);
     let a_send_cloned = Arc::clone(&a_send);
 
-    thread::spawn(move || {
-        let mut buffer = vec![0u8; u16::MAX as usize];
-        let mut recv = 0;
-        loop {
-            // Receive
-            match a_rw_cloned.recv_from(buffer.as_mut_slice()) {
-                Ok((size, a)) => {
-                    if size > 0 && a == addr {
-                        // Parse the DNS answer
-                        if let Ok(ref packet) = Packet::parse(&buffer[..size]) {
-                            let id = packet.header.id;
-                            if let Some(instant) = a_time_map_cloned.lock().unwrap().get(&id) {
-                                let elapsed = instant.elapsed().as_micros() as f64;
-                                let elapsed = elapsed / 1000.0;
-                                recv += 1;
-                                let send = a_send_cloned.load(Ordering::Relaxed);
-                                let diff = send
-                                    .checked_sub(recv)
-                                    .unwrap_or_else(|| send + (usize::MAX - recv));
-                                // Log
-                                if recv == send {
-                                    println!(
-                                        "{} bytes from {}: id={} time={:.2} ms",
-                                        size, a, id, elapsed
-                                    );
-                                } else {
-                                    println!(
-                                        "{} bytes from {}: id={} time={:.2} ms ({} packet loss)",
-                                        size, a, id, elapsed, diff
-                                    );
-                                }
-                            }
-                            a_time_map_cloned.lock().unwrap().remove(&id);
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("{}", e);
-                    return;
-                }
-            }
-        }
-    });
-
     // Psuedo DNS query
     let mut query = Builder::new_query(0, true);
     if is_ipv6 {
@@ -188,26 +144,73 @@ pub fn ping(rw: Box<dyn RW + Send + Sync>, addr: SocketAddr, host: String) -> Re
     println!("PING {} for {} {} bytes of data.", addr, host, buffer.len());
 
     // Send query
-    let mut id = 0;
-    loop {
-        // Create a DNS query
-        let mut query = Builder::new_query(id, true);
-        if is_ipv6 {
-            query.add_question(&host, false, QueryType::AAAA, QueryClass::IN);
-        } else {
-            query.add_question(&host, false, QueryType::A, QueryClass::IN);
+    thread::spawn(move || {
+        let mut id = 0;
+        loop {
+            id += 1;
+            // Create a DNS query
+            let mut query = Builder::new_query(id, true);
+            if is_ipv6 {
+                query.add_question(&host, false, QueryType::AAAA, QueryClass::IN);
+            } else {
+                query.add_question(&host, false, QueryType::A, QueryClass::IN);
+            }
+            let buffer = query.build().unwrap();
+
+            // Update timestamp
+            a_time_map.lock().unwrap().insert(id, Instant::now());
+
+            // Send
+            match a_rw.send_to(buffer.as_slice(), addr) {
+                Ok(_) => {
+                    a_send.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(ref e) => eprintln!("{}", e),
+            }
+
+            // Wait for a certain time
+            thread::sleep(Duration::from_millis(PERIOD));
         }
-        let buffer = query.build().unwrap();
+    });
 
-        // Update timestamp
-        a_time_map.lock().unwrap().insert(id, Instant::now());
-
-        // Send
-        a_rw.send_to(buffer.as_slice(), addr)?;
-        a_send.fetch_add(1, Ordering::Relaxed);
-
-        // Wait for a certain time
-        thread::sleep(Duration::from_millis(PERIOD));
-        id += 1;
+    let mut buffer = vec![0u8; u16::MAX as usize];
+    let mut recv = 0;
+    loop {
+        // Receive
+        match a_rw_cloned.recv_from(buffer.as_mut_slice()) {
+            Ok((size, a)) => {
+                if size > 0 && a == addr {
+                    // Parse the DNS answer
+                    if let Ok(ref packet) = Packet::parse(&buffer[..size]) {
+                        let id = packet.header.id;
+                        if let Some(instant) = a_time_map_cloned.lock().unwrap().get(&id) {
+                            let elapsed = instant.elapsed().as_micros() as f64;
+                            let elapsed = elapsed / 1000.0;
+                            recv += 1;
+                            let send = a_send_cloned.load(Ordering::Relaxed);
+                            let diff = send
+                                .checked_sub(recv)
+                                .unwrap_or_else(|| send + (usize::MAX - recv));
+                            // Log
+                            if recv == send {
+                                println!(
+                                    "{} bytes from {}: id={} time={:.2} ms",
+                                    size, a, id, elapsed
+                                );
+                            } else {
+                                println!(
+                                    "{} bytes from {}: id={} time={:.2} ms ({} packet loss)",
+                                    size, a, id, elapsed, diff
+                                );
+                            }
+                        }
+                        a_time_map_cloned.lock().unwrap().remove(&id);
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        }
     }
 }
