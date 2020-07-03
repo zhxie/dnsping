@@ -17,8 +17,6 @@ dnsping <ADDRESS> -h <HOST> -s <ADDRESS>
 
 ### Flags
 
-`--no-stat`: Disable statistics.
-
 `--help`: Prints help information.
 
 `-V, --version`: Prints version information.

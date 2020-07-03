@@ -1,9 +1,8 @@
 use ctrlc;
 use dnsping as lib;
-use lib::{Datagram, Socket, RW};
+use lib::{Datagram, Message, Socket, RW};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::mpsc;
 
 fn main() {
     // Parse arguments
@@ -52,15 +51,19 @@ fn main() {
     };
 
     // Handle Ctrl+C
-    let stopped = Arc::new(AtomicBool::new(false));
-    let stopped_cloned = Arc::clone(&stopped);
-    if !flags.no_stat {
-        ctrlc::set_handler(move || stopped.store(true, Ordering::Relaxed)).unwrap();
-    }
+    let (tx, rx) = mpsc::channel::<Message>();
+    let tx_cloned = tx.clone();
+    ctrlc::set_handler(move || {
+        if let Err(_) = tx.send(Message::Close) {
+            return;
+        }
+    })
+    .unwrap();
 
     if let Err(ref e) = lib::ping(
         rw,
-        stopped_cloned,
+        tx_cloned,
+        rx,
         SocketAddr::new(flags.server, flags.port),
         flags.host,
     ) {
