@@ -4,6 +4,12 @@ version = "0.1.0"
 authors = ["Xie Zhihao <xzh1206@gmail.com>"]
 edition = "2018"
 description = "Ping a server with DNS."
+documentation = "https://docs.rs/dnsping"
+readme = "README.md"
+repository = "https://github.com/zhxie/dnsping"
+license = "MIT"
+keywords = ["dns", "ping"]
+categories = ["command-line-utilities", "network-programming"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

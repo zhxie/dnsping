@@ -1,59 +1,30 @@
-use clap::{crate_description, crate_version, Clap};
+//! Ping a server with DNS.
+
 use dns_parser::{Builder, Packet, QueryClass, QueryType};
 use socks::{Socks5Datagram, TargetAddr};
-use std::clone::Clone;
-use std::cmp;
-use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Result};
-use std::net::{IpAddr, SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
-/// Represents the flags of the application.
-#[derive(Clap, Clone, Debug, Eq, Hash, PartialEq)]
-#[clap(
-    version = crate_version!(),
-    about = crate_description!()
-)]
-pub struct Flags {
-    #[clap(name = "ADDRESS", about = "Server")]
-    pub server: IpAddr,
-    #[clap(long, short, about = "Do DNS query iteratively")]
-    pub iterate: bool,
-    #[clap(long, short, about = "Port", value_name = "PORT", default_value = "53")]
-    pub port: u16,
-    #[clap(
-        long,
-        short,
-        about = "Host",
-        value_name = "HOST",
-        default_value = "www.google.com"
-    )]
-    pub host: String,
-    #[clap(
-        long = "socks-proxy",
-        short = "s",
-        about = "SOCKS proxy",
-        value_name = "ADDRESS"
-    )]
-    pub proxy: Option<SocketAddr>,
-}
-
-/// Parses the arguments.
-pub fn parse() -> Flags {
-    Flags::parse()
-}
-
 /// Represents an socket which can send data to and receive data from a certain address.
-pub trait RW {
+pub trait RW: Send + Sync {
     /// Sends data on the socket to the given address.
     fn send_to(&self, buf: &[u8], addr: SocketAddr) -> Result<usize>;
 
     /// Receives a single datagram message on the socket.
     fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)>;
+
+    /// Sets the read timeout to the timeout specified.
+    fn set_read_timeout(&self, dur: Option<Duration>) -> Result<()>;
+
+    /// Sets the write timeout to the timeout specified.
+    fn set_write_timeout(&self, dur: Option<Duration>) -> Result<()>;
+
+    /// Returns the read timeout of this socket.
+    fn read_timeout(&self) -> Result<Option<Duration>>;
+
+    /// Returns the write timeout of this socket.
+    fn write_timeout(&self) -> Result<Option<Duration>>;
 }
 
 /// Represents an UDP datagram, containing a TCP stream keeping the SOCKS proxy alive and an UDP
@@ -85,6 +56,22 @@ impl RW for Datagram {
             _ => unreachable!(),
         };
     }
+
+    fn set_read_timeout(&self, dur: Option<Duration>) -> Result<()> {
+        self.datagram.get_ref().set_read_timeout(dur)
+    }
+
+    fn set_write_timeout(&self, dur: Option<Duration>) -> Result<()> {
+        self.datagram.get_ref().set_write_timeout(dur)
+    }
+
+    fn read_timeout(&self) -> Result<Option<Duration>> {
+        self.datagram.get_ref().read_timeout()
+    }
+
+    fn write_timeout(&self) -> Result<Option<Duration>> {
+        self.datagram.get_ref().write_timeout()
+    }
 }
 
 /// Represents an UDP socket.
@@ -110,47 +97,39 @@ impl RW for Socket {
     fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
         self.socket.recv_from(buf)
     }
+
+    fn set_read_timeout(&self, dur: Option<Duration>) -> Result<()> {
+        self.socket.set_read_timeout(dur)
+    }
+
+    fn set_write_timeout(&self, dur: Option<Duration>) -> Result<()> {
+        self.socket.set_write_timeout(dur)
+    }
+
+    fn read_timeout(&self) -> Result<Option<Duration>> {
+        self.socket.read_timeout()
+    }
+
+    fn write_timeout(&self) -> Result<Option<Duration>> {
+        self.socket.write_timeout()
+    }
 }
 
-/// Represents the period sending ping in milliseconds. After a new ping is sent, all unreceived
-/// previous ping will be considered as timed out.
-const PERIOD: u64 = 1000;
-
-/// Represents a message.
-#[derive(Debug)]
-pub enum Message {
-    Recv(u16, usize),
-    Error(Error),
-    Close,
-}
-
-/// Pings the DNS server.
+/// Pings a DNS server.
 pub fn ping(
-    rw: Box<dyn RW + Send + Sync>,
-    tx: Sender<Message>,
-    rx: Receiver<Message>,
-    iterate: bool,
+    rw: &Box<dyn RW>,
     addr: SocketAddr,
-    host: String,
-) -> Result<()> {
+    id: u16,
+    iterate: bool,
+    host: &String,
+) -> Result<(usize, Duration)> {
     let is_ipv6 = match addr {
         SocketAddr::V4(_) => false,
         SocketAddr::V6(_) => true,
     };
 
-    let a_rw = Arc::new(rw);
-    let a_rw_cloned = Arc::clone(&a_rw);
-
-    let time_map: HashMap<u16, Instant> = HashMap::new();
-    let a_time_map = Arc::new(Mutex::new(time_map));
-    let a_time_map_cloned = Arc::clone(&a_time_map);
-
-    let send = AtomicUsize::new(0);
-    let a_send = Arc::new(send);
-    let a_send_cloned = Arc::clone(&a_send);
-
-    // Psuedo DNS query
-    let mut query = Builder::new_query(0, true);
+    // DNS query
+    let mut query = Builder::new_query(id, iterate);
     if is_ipv6 {
         query.add_question(&host, false, QueryType::AAAA, QueryClass::IN);
     } else {
@@ -162,129 +141,31 @@ pub fn ping(
             return Err(Error::from(ErrorKind::InvalidData));
         }
     };
-    println!("PING {} for {} {} bytes of data.", addr, host, buffer.len());
 
     // Send query
-    thread::spawn(move || {
-        let mut id = 0;
-        loop {
-            id += 1;
-            // Create a DNS query
-            let mut query = Builder::new_query(id, !iterate);
-            if is_ipv6 {
-                query.add_question(&host, false, QueryType::AAAA, QueryClass::IN);
-            } else {
-                query.add_question(&host, false, QueryType::A, QueryClass::IN);
-            }
-            let buffer = query.build().unwrap();
+    let mut recv_buffer = vec![0u8; u16::MAX as usize];
+    let instant = Instant::now();
+    let _ = rw.send_to(buffer.as_slice(), addr)?;
 
-            // Update timestamp
-            a_time_map.lock().unwrap().insert(id, Instant::now());
-
-            // Send
-            match a_rw.send_to(buffer.as_slice(), addr) {
-                Ok(_) => {
-                    a_send.fetch_add(1, Ordering::Relaxed);
-                }
-                Err(ref e) => eprintln!("{}", e),
-            }
-
-            // Wait for a certain time
-            thread::sleep(Duration::from_millis(PERIOD));
-        }
-    });
-
-    // Receive response
-    thread::spawn(move || {
-        let mut buffer = vec![0u8; u16::MAX as usize];
-        loop {
-            // Receive
-            match a_rw_cloned.recv_from(buffer.as_mut_slice()) {
-                Ok((size, a)) => {
-                    if size > 0 && a == addr {
+    // Receive
+    loop {
+        match rw.recv_from(recv_buffer.as_mut_slice()) {
+            Ok((size, a)) => {
+                if size <= 0 {
+                    return Err(Error::from(ErrorKind::UnexpectedEof));
+                } else {
+                    if a == addr {
                         // Parse the DNS answer
-                        if let Ok(ref packet) = Packet::parse(&buffer[..size]) {
-                            let id = packet.header.id;
-                            if let Err(_) = tx.send(Message::Recv(id, size)) {
-                                return;
+                        if let Ok(packet) = Packet::parse(&recv_buffer[..size]) {
+                            if packet.header.id == id {
+                                return Ok((size, instant.elapsed()));
                             }
                         }
                     }
                 }
-                Err(e) => {
-                    if let Err(_) = tx.send(Message::Error(e)) {
-                        return;
-                    }
-                }
             }
-        }
-    });
-
-    let mut recv = 0;
-    let mut min = u128::MAX;
-    let mut max = u128::MIN;
-    let mut total = 0;
-
-    // Handle messages
-    loop {
-        match rx.recv() {
-            Ok(message) => match message {
-                Message::Recv(id, size) => {
-                    if let Some(instant) = a_time_map_cloned.lock().unwrap().get(&id) {
-                        let elapsed = instant.elapsed().as_micros();
-                        min = cmp::min(min, elapsed);
-                        max = cmp::max(max, elapsed);
-                        total += elapsed;
-
-                        let elapsed = (elapsed as f64) / 1000.0;
-                        recv += 1;
-                        let send = a_send_cloned.load(Ordering::Relaxed);
-                        let diff = send
-                            .checked_sub(recv)
-                            .unwrap_or_else(|| send + (usize::MAX - recv));
-                        // Log
-                        let mut loss = String::new();
-                        if diff == 1 {
-                            loss = format!(" ({} packet loss)", diff);
-                        } else if diff > 1 {
-                            loss = format!(" ({} packets loss)", diff);
-                        }
-                        println!(
-                            "{} bytes from {}: id={} time={:.2} ms{}",
-                            size, addr, id, elapsed, loss
-                        );
-                    }
-                    a_time_map_cloned.lock().unwrap().remove(&id);
-                }
-                Message::Error(e) => return Err(e),
-                Message::Close => {
-                    let send = a_send_cloned.load(Ordering::Relaxed);
-                    println!("--- {} ping statistics ---", addr);
-                    println!(
-                        "{} packets transmitted, {} received, {:.2}% packet loss",
-                        send,
-                        recv,
-                        ((send
-                            .checked_sub(recv)
-                            .unwrap_or_else(|| send + (usize::MAX - recv)))
-                            as f64)
-                            / (send as f64)
-                            * 100.0
-                    );
-                    if recv != 0 {
-                        println!(
-                            "rtt min/avg/max = {:.3}/{:.3}/{:.3} ms",
-                            min as f64 / 1000.0,
-                            (total as f64 / 1000.0) / (recv as f64),
-                            max as f64 / 1000.0
-                        );
-                    }
-
-                    return Ok(());
-                }
-            },
             Err(e) => {
-                return Err(Error::new(ErrorKind::Other, e));
+                return Err(e);
             }
         }
     }
