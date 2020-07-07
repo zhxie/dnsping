@@ -183,7 +183,8 @@ fn main() {
                     latency_total.fetch_add(duration, Ordering::Relaxed);
                     if latency_max.load(Ordering::Relaxed) < duration {
                         latency_max.store(duration, Ordering::Relaxed);
-                    } else if latency_min.load(Ordering::Relaxed) > duration {
+                    }
+                    if latency_min.load(Ordering::Relaxed) > duration {
                         latency_min.store(duration, Ordering::Relaxed);
                     }
                 }
