@@ -164,7 +164,10 @@ fn main() {
         );
 
         loop {
-            let id = send.fetch_add(1, Ordering::Relaxed);
+            let id = send
+                .fetch_add(1, Ordering::Relaxed)
+                .checked_add(1)
+                .unwrap_or(0);
             let instant = Instant::now();
 
             // Ping
@@ -201,7 +204,7 @@ fn main() {
             };
 
             // Reach max send count
-            if id == flags.count.checked_sub(1).unwrap_or(usize::MAX) {
+            if id == flags.count {
                 let _ = tx.send(());
                 return;
             }
