@@ -3,13 +3,154 @@ use dns_parser::{Builder, QueryClass, QueryType};
 use dnsping as lib;
 use lib::{Datagram, Socket, RW};
 use std::clone::Clone;
+use std::fmt::Display;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{AddrParseError, IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 use structopt::StructOpt;
+
+#[derive(Debug)]
+enum ResolvableAddrParseError {
+    AddrParseError(AddrParseError),
+    ResolveError(io::Error),
+}
+
+impl Display for ResolvableAddrParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResolvableAddrParseError::AddrParseError(e) => write!(f, "{}", e),
+            ResolvableAddrParseError::ResolveError(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+impl From<AddrParseError> for ResolvableAddrParseError {
+    fn from(s: AddrParseError) -> Self {
+        ResolvableAddrParseError::AddrParseError(s)
+    }
+}
+
+impl From<io::Error> for ResolvableAddrParseError {
+    fn from(s: io::Error) -> Self {
+        ResolvableAddrParseError::ResolveError(s)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ResolvableSocketAddr {
+    addr_v4: Option<SocketAddrV4>,
+    addr_v6: Option<SocketAddrV6>,
+    alias: Option<String>,
+}
+
+impl ResolvableSocketAddr {
+    fn addr_v4(&self) -> Option<SocketAddrV4> {
+        self.addr_v4
+    }
+
+    fn addr_v6(&self) -> Option<SocketAddrV6> {
+        self.addr_v6
+    }
+}
+
+impl Display for ResolvableSocketAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.addr_v4.is_some() && self.addr_v6.is_some() {
+            write!(f, "{}/{}", self.addr_v4.unwrap(), self.addr_v6.unwrap())?;
+        } else if self.addr_v4.is_some() {
+            write!(f, "{}", self.addr_v4.unwrap())?;
+        } else if self.addr_v6.is_some() {
+            write!(f, "{}", self.addr_v6.unwrap())?;
+        } else {
+            unreachable!()
+        }
+        match &self.alias {
+            Some(alias) => write!(f, " ({})", alias),
+            None => Ok(()),
+        }
+    }
+}
+
+impl FromStr for ResolvableSocketAddr {
+    type Err = ResolvableAddrParseError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let has_alias;
+        let (addr_v4, addr_v6) = match s.parse() {
+            Ok(addr) => {
+                has_alias = false;
+
+                match addr {
+                    SocketAddr::V4(addr_v4) => (Some(addr_v4), None),
+                    SocketAddr::V6(addr_v6) => (None, Some(addr_v6)),
+                }
+            }
+            Err(e) => {
+                has_alias = true;
+
+                let v = s.split(":").collect::<Vec<_>>();
+                if v.len() != 2 {
+                    return Err(ResolvableAddrParseError::from(e));
+                }
+
+                let port = match v[1].parse() {
+                    Ok(port) => port,
+                    Err(_) => return Err(ResolvableAddrParseError::from(e)),
+                };
+
+                let mut ip_v4 = None;
+                let mut ip_v6 = None;
+                match dns_lookup::lookup_host(v[0]) {
+                    Ok(addrs) => {
+                        for addr in addrs {
+                            match addr {
+                                IpAddr::V4(addr_v4) => {
+                                    if ip_v4.is_none() {
+                                        ip_v4 = Some(addr_v4);
+                                    }
+                                }
+                                IpAddr::V6(addr_v6) => {
+                                    if ip_v6.is_none() {
+                                        ip_v6 = Some(addr_v6);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => return Err(ResolvableAddrParseError::from(e)),
+                };
+
+                if ip_v4.is_none() && ip_v6.is_none() {
+                    return Err(ResolvableAddrParseError::from(e));
+                }
+
+                let addr_v4 = match ip_v4 {
+                    Some(ip_v4) => Some(SocketAddrV4::new(ip_v4, port)),
+                    None => None,
+                };
+                let addr_v6 = match ip_v6 {
+                    Some(ip_v6) => Some(SocketAddrV6::new(ip_v6, port, 0, 0)),
+                    None => None,
+                };
+
+                (addr_v4, addr_v6)
+            }
+        };
+
+        let alias = match has_alias {
+            true => Some(String::from_str(s).unwrap()),
+            false => None,
+        };
+        Ok(ResolvableSocketAddr {
+            addr_v4,
+            addr_v6,
+            alias,
+        })
+    }
+}
 
 #[derive(StructOpt, Clone, Debug, Eq, Hash, PartialEq)]
 #[structopt(about)]
@@ -43,7 +184,7 @@ struct Flags {
         value_name = "ADDRESS",
         display_order(3)
     )]
-    pub proxy: Option<SocketAddr>,
+    pub proxy: Option<ResolvableSocketAddr>,
     #[structopt(
         long,
         help = "Username",
@@ -92,26 +233,31 @@ struct Flags {
 fn main() {
     // Parse arguments
     let flags = Flags::from_args();
-    if let Some(ref proxy) = flags.proxy {
-        match proxy {
-            SocketAddr::V4(proxy) => {
-                if let IpAddr::V6(server) = flags.server {
+    let proxy = match &flags.proxy {
+        Some(proxy) => match flags.server {
+            IpAddr::V4(server) => match proxy.addr_v4() {
+                Some(addr_v4) => Some(SocketAddr::V4(addr_v4)),
+                None => {
                     eprintln!(
                         "The IP protocol numbers of the server {} and the proxy {} do not match",
                         server, proxy
                     );
+                    return;
                 }
-            }
-            SocketAddr::V6(proxy) => {
-                if let IpAddr::V4(server) = flags.server {
+            },
+            IpAddr::V6(server) => match proxy.addr_v6() {
+                Some(addr_v6) => Some(SocketAddr::V6(addr_v6)),
+                None => {
                     eprintln!(
                         "The IP protocol numbers of the server {} and the proxy {} do not match",
                         server, proxy
                     );
+                    return;
                 }
-            }
-        }
-    }
+            },
+        },
+        None => None,
+    };
     let addr = SocketAddr::new(flags.server, flags.port);
 
     // Bind socket
@@ -119,7 +265,7 @@ fn main() {
         IpAddr::V4(_) => "0.0.0.0:0".parse().unwrap(),
         IpAddr::V6(_) => "[::]:0".parse().unwrap(),
     };
-    let rw: Box<dyn RW> = match flags.proxy {
+    let rw: Box<dyn RW> = match proxy {
         Some(proxy) => {
             let auth = match flags.username.clone() {
                 Some(username) => Some((username, flags.password.clone().unwrap())),
