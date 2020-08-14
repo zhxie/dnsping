@@ -1,4 +1,3 @@
-use clap::{crate_description, crate_version, Clap};
 use ctrlc;
 use dns_parser::{Builder, QueryClass, QueryType};
 use dnsping as lib;
@@ -10,63 +9,89 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
+use structopt::StructOpt;
 
-#[derive(Clap, Clone, Debug, Eq, Hash, PartialEq)]
-#[clap(
-    version = crate_version!(),
-    about = crate_description!()
-)]
+#[derive(StructOpt, Clone, Debug, Eq, Hash, PartialEq)]
+#[structopt(about)]
 struct Flags {
-    #[clap(name = "ADDRESS", about = "Server")]
+    #[structopt(name = "ADDRESS", help = "Server")]
     pub server: IpAddr,
-    #[clap(long, short, about = "Do query iteratively")]
+    #[structopt(long, short, help = "Do query iteratively")]
     pub iterate: bool,
-    #[clap(long, short, about = "Port", value_name = "PORT", default_value = "53")]
-    pub port: u16,
-    #[clap(
-        long,
-        short = "H",
-        about = "Host",
-        value_name = "HOST",
-        default_value = "www.google.com"
-    )]
-    pub host: String,
-    #[clap(
-        long = "socks-proxy",
-        short = "s",
-        about = "SOCKS proxy",
-        value_name = "ADDRESS"
-    )]
-    pub proxy: Option<SocketAddr>,
-    #[clap(
+    #[structopt(
         long,
         short,
-        about = "Number of queries to send",
+        help = "Port",
+        value_name = "PORT",
+        default_value = "53",
+        display_order(0)
+    )]
+    pub port: u16,
+    #[structopt(
+        long,
+        short = "H",
+        help = "Host",
+        value_name = "HOST",
+        default_value = "www.google.com",
+        display_order(1)
+    )]
+    pub host: String,
+    #[structopt(
+        long = "socks-proxy",
+        short = "s",
+        help = "SOCKS proxy",
+        value_name = "ADDRESS",
+        display_order(3)
+    )]
+    pub proxy: Option<SocketAddr>,
+    #[structopt(
+        long,
+        help = "Username",
         value_name = "VALUE",
-        default_value = "0"
+        requires("password"),
+        display_order(4)
+    )]
+    pub username: Option<String>,
+    #[structopt(
+        long,
+        help = "Password",
+        value_name = "VALUE",
+        requires("username"),
+        display_order(5)
+    )]
+    pub password: Option<String>,
+    #[structopt(
+        long,
+        short,
+        help = "Number of queries to send",
+        value_name = "VALUE",
+        default_value = "0",
+        display_order(6)
     )]
     pub count: usize,
-    #[clap(
+    #[structopt(
         long,
         short = "I",
-        about = "Wait between sending each packet",
+        help = "Wait between sending each packet",
         value_name = "VALUE",
-        default_value = "1000"
+        default_value = "1000",
+        display_order(7)
     )]
     pub interval: u64,
-    #[clap(
-        long = "timeout",
+    #[structopt(
+        long,
         short = "w",
-        about = "Timeout to wait for each response",
+        help = "Timeout to wait for each response",
         value_name = "VALUE",
-        default_value = "1000"
+        default_value = "1000",
+        display_order(8)
     )]
     pub timeout: u64,
 }
 
 fn main() {
     // Parse arguments
-    let flags = Flags::parse();
+    let flags = Flags::from_args();
     if let Some(ref proxy) = flags.proxy {
         match proxy {
             SocketAddr::V4(proxy) => {
@@ -95,13 +120,19 @@ fn main() {
         IpAddr::V6(_) => "[::]:0".parse().unwrap(),
     };
     let rw: Box<dyn RW> = match flags.proxy {
-        Some(proxy) => match Datagram::bind(proxy, local) {
-            Ok(datagram) => Box::new(datagram),
-            Err(ref e) => {
-                eprintln!("{}", e);
-                return;
+        Some(proxy) => {
+            let auth = match flags.username.clone() {
+                Some(username) => Some((username, flags.password.clone().unwrap())),
+                None => None,
+            };
+            match Datagram::bind(proxy, local, auth) {
+                Ok(datagram) => Box::new(datagram),
+                Err(ref e) => {
+                    eprintln!("{}", e);
+                    return;
+                }
             }
-        },
+        }
         None => match Socket::bind(local) {
             Ok(socket) => Box::new(socket),
             Err(ref e) => {
